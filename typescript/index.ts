@@ -1,80 +1,122 @@
-import { ec, encode, TypedData, Signer, typedData, WeierstrassSignatureType } from 'starknet';
+import * as readline from 'readline';
+import { hkdfSync } from 'crypto';
 
-async function main() {
-    //--------------------------------------------------------------------------
-    // Account
-    //--------------------------------------------------------------------------
-    const privateKey = '0x1234567890987654321';
+// --- Generic key derivation helpers (chain‑agnostic) ---
 
-    const starknetPublicKey = ec.starkCurve.getStarkKey(privateKey);
+const INFO = Buffer.from('generic-signature-key-derivation', 'utf8');
+const KEY_LENGTH = 32; // 256 bits
 
-    const fullPublicKey = encode.addHexPrefix(
-        encode.buf2hex(ec.starkCurve.getPublicKey(privateKey, false))
-    );
+// Normalize hex string: remove 0x prefix if present
+function normalizeHex(hex: string): string {
+    return hex.startsWith('0x') ? hex.slice(2) : hex;
+}
 
-    const pubX = starknetPublicKey
-    const pubY = encode.addHexPrefix(fullPublicKey.slice(68))
+// Convert arbitrary input (Buffer or hex string) to Buffer
+function toBuffer(input: Buffer | string): Buffer {
+    if (Buffer.isBuffer(input)) return input;
+    const clean = normalizeHex(input);
+    return Buffer.from(clean, 'hex');
+}
 
-    console.log("Account:")
-    console.log("\tprivate key: ", privateKey)
-    // 0x1234567890987654321
-    console.log("\tFull (uncompressed) public key: ", fullPublicKey)
-    // 0x4020c29f1c98f3320d56f01c13372c923123c35828bce54f2153aa1cfe61c44f2018277bc1bc80570f859cb882ca70d52f1a0e06275e5dd704dddbbe19faadf
-    console.log("\tCoordinates of the public key: x=", pubX, ", y=", pubY)
-    // x=0x20c29f1c98f3320d56f01c13372c923123c35828bce54f2153aa1cfe61c44f2, y=0x18277bc1bc80570f859cb882ca70d52f1a0e06275e5dd704dddbbe19faadf
-    console.log("\tStarknet public key: ", starknetPublicKey, " (= x-coordinate of the public key)")
-    // 0x20c29f1c98f3320d56f01c13372c923123c35828bce54f2153aa1cfe61c44f2
+/**
+ * Create an initial key from a signature and a chainId.
+ * - `signature` can be an Ethereum ECDSA signature, Starknet signature, or any other chain's signature, as hex or Buffer.
+ * - `chainId` should be a hex string or Buffer representing signature's chainId.
+ */
+export function createInitialKeyFromSignature(
+    signature: Buffer | string,
+    chainId: Buffer | string,
+): string {
+    const sigBuf = toBuffer(signature);
+    const chainIdBuf = toBuffer(chainId);
 
-    //--------------------------------------------------------------------------
-    // Message
-    //--------------------------------------------------------------------------
+    const keyBuf = hkdfSync('sha256', sigBuf as any, chainIdBuf as any, INFO as any, KEY_LENGTH);
+    return '0x' + (keyBuf as any).toString('hex');
+}
 
-    const messageStructure: TypedData = {
-        types: {
-            StarkNetDomain: [
-                { name: "name", type: "felt" },
-                { name: "chainId", type: "felt" },
-                { name: "version", type: "felt" },
-            ],
-            Message: [{ name: "message", type: "felt" }],
-        },
-        primaryType: "Message",
-        domain: {
-            name: "MyDapp",
-            chainId: "SN_MAIN",
-            version: "0.0.1",
-        },
-        message: {
-            message: "hello world!",
-        },
-    };
+/**
+ * Derive a key from an initial key and a timelock value.
+ * - `initialKey` is the hex or Buffer returned by `createInitialKeyFromSignature`.
+ * - `timelock` is typically a Unix timestamp or any monotonically increasing value (number or bigint).
+ */
+export function deriveKeyFromInitialKeyAndTimelock(
+    initialKey: Buffer | string,
+    timelock: bigint | number | string,
+): string {
+    const keyBuf = toBuffer(initialKey);
 
-    const messageHash = typedData.getMessageHash(messageStructure, BigInt(starknetPublicKey))
-
-    console.log("\nMessage:")
-    console.log("\tMessage hash: ", messageHash)
-    // 0x197093614bca282524e6b8f77de8f7dd9a9dd92ed4ea7f4f2b17f95e2bc441d
-
-    //--------------------------------------------------------------------------
-    // Signature
-    //--------------------------------------------------------------------------
-
-    const signer = new Signer(privateKey)
-
-    let signature: WeierstrassSignatureType;
-    try {
-        signature = (await signer.signMessage(messageStructure, starknetPublicKey)) as WeierstrassSignatureType
-    } catch (error) {
-        console.error("Error signing the message:", error);
-        throw error;
+    let timeBig: bigint;
+    if (typeof timelock === 'bigint') {
+        timeBig = timelock;
+    } else if (typeof timelock === 'number') {
+        timeBig = BigInt(timelock);
+    } else {
+        // string – allow decimal or hex with 0x
+        if (timelock.startsWith('0x')) {
+            timeBig = BigInt(timelock);
+        } else {
+            timeBig = BigInt(timelock);
+        }
     }
 
-    const isValid = ec.starkCurve.verify(signature, messageHash, fullPublicKey)
+    const timeHex = timeBig.toString(16);
+    const timeBuf = Buffer.from(timeHex.length % 2 === 0 ? timeHex : '0' + timeHex, 'hex');
 
-    console.log("\nSignature:")
-    console.log("\tSignature: ", signature)
-    // r=0x59e1a24dc86990b8c1210d6e18d5641e6b94828d595b0d98279052f013e9945, s=0x72a50af8139178dddbb4b34ef2567fa78dcd44df8307cc47a2e39a6090e46eb
-    console.log("\tSignature is valid: ", isValid)
-    // true
+    const derivedBuf = hkdfSync('sha256', keyBuf as any, timeBuf as any, INFO as any, KEY_LENGTH);
+    return '0x' + (derivedBuf as any).toString('hex');
 }
+
+// --- Optional CLI for manual testing ---
+
+function askQuestion(query: string): Promise<string> {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+        rl.question(query, (answer) => {
+            rl.close();
+            resolve(answer.trim());
+        });
+    });
+}
+
+async function main() {
+    console.log('=== Generic Signature → Key Derivation Tool ===\n');
+
+    // Get signature and chainId (e.g. chain id) from the user
+    const signatureHex = await askQuestion('Enter signature (hex, e.g. Ethereum 0x...): ');
+    const chainIdHex = await askQuestion('Enter chainId');
+
+    const initialKey = createInitialKeyFromSignature(signatureHex, chainIdHex);
+    console.log('\nInitial key:', initialKey);
+
+    while (true) {
+        console.log('\nOptions:');
+        console.log('  1) Derive key from initial key and timelock');
+        console.log('  2) Exit');
+
+        const choice = await askQuestion('Choose an option (1/2): ');
+
+        if (choice === '2') {
+            console.log('\nDone.');
+            break;
+        } else if (choice === '1') {
+            const tInput = await askQuestion(
+                'Enter timelock (Unix timestamp or bigint, decimal or 0x...): ',
+            );
+
+            try {
+                const derivedKey = deriveKeyFromInitialKeyAndTimelock(initialKey, tInput);
+                console.log('\nDerived key:', derivedKey);
+            } catch (err) {
+                console.error('Error deriving key:', err);
+            }
+        } else {
+            console.log('Invalid choice. Please enter 1 or 2.');
+        }
+    }
+}
+
 main()
