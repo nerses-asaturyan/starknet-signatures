@@ -12,12 +12,10 @@
   "license": "MIT",
   "description": "",
   "devDependencies": {
-    "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@scure/base": "^2.0.0",
-    "starknet": "^6.23.1"
+    "@scure/base": "^2.0.0"
   }
 }
